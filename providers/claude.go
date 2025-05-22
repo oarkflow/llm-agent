@@ -3,7 +3,6 @@ package providers
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/llmagent"
+	"github.com/oarkflow/llmagent/sdk/claude"
 )
 
 type ClaudeProvider struct {
@@ -72,7 +72,7 @@ func (c *ClaudeProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 	out := make(chan llmagent.CompletionResponse)
 	go func() {
 		defer close(out)
-		body := map[string]any{
+		payload := map[string]any{
 			"model":       req.Model,
 			"messages":    req.Messages,
 			"stream":      *req.Stream,
@@ -80,27 +80,18 @@ func (c *ClaudeProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			"max_tokens":  req.MaxTokens,
 			"top_p":       req.TopP,
 		}
-		data, _ := json.Marshal(body)
-		httpReq, _ := http.NewRequestWithContext(ctx, "POST", c.cfg.BaseURL+"/v1/complete", bytes.NewReader(data))
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-		httpReq.Header.Set("Content-Type", "application/json")
-		resp, err := c.httpClient.Do(httpReq)
+		client := claude.NewClient(c.apiKey, c.cfg.BaseURL, "/v1/complete", c.cfg.Timeout, c.cfg.DefaultModel, c.cfg.SupportedModels)
+		bodyRc, err := client.Complete(ctx, payload)
 		if err != nil {
 			out <- llmagent.CompletionResponse{Err: err}
 			return
 		}
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(resp.Body)
-			out <- llmagent.CompletionResponse{Err: errors.New("HTTP " + http.StatusText(resp.StatusCode) + ": " + string(b))}
-			resp.Body.Close()
-			return
-		}
-		defer resp.Body.Close()
+		defer bodyRc.Close()
 		if !req.StreamValue() {
 			var r struct {
 				Completion string `json:"completion"`
 			}
-			b, _ := io.ReadAll(resp.Body)
+			b, _ := io.ReadAll(bodyRc)
 			if err := json.Unmarshal(b, &r); err != nil {
 				out <- llmagent.CompletionResponse{Err: err}
 			} else {
@@ -108,7 +99,7 @@ func (c *ClaudeProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			}
 			return
 		}
-		reader := bufio.NewReader(resp.Body)
+		reader := bufio.NewReader(bodyRc)
 		for {
 			line, err := reader.ReadBytes('\n')
 			if err != nil {

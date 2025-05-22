@@ -3,7 +3,6 @@ package providers
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/llmagent"
+	"github.com/oarkflow/llmagent/sdk/deepseek"
 )
 
 type DeepSeekProvider struct {
@@ -75,7 +75,7 @@ func (d *DeepSeekProvider) Complete(ctx context.Context, req llmagent.Completion
 	out := make(chan llmagent.CompletionResponse)
 	go func() {
 		defer close(out)
-		body := map[string]any{
+		payload := map[string]any{
 			"model":       req.Model,
 			"messages":    req.Messages,
 			"stream":      *req.Stream,
@@ -83,27 +83,18 @@ func (d *DeepSeekProvider) Complete(ctx context.Context, req llmagent.Completion
 			"max_tokens":  req.MaxTokens,
 			"top_p":       req.TopP,
 		}
-		data, _ := json.Marshal(body)
-		httpReq, _ := http.NewRequestWithContext(ctx, "POST", d.cfg.BaseURL+"/chat/completions", bytes.NewReader(data))
-		httpReq.Header.Set("Authorization", "Bearer "+d.apiKey)
-		httpReq.Header.Set("Content-Type", "application/json")
-		resp, err := d.httpClient.Do(httpReq)
+		client := deepseek.NewClient(d.apiKey, d.cfg.BaseURL, "/chat/completions", d.cfg.Timeout, d.cfg.DefaultModel, d.cfg.SupportedModels)
+		bodyRc, err := client.ChatCompletion(ctx, payload)
 		if err != nil {
 			out <- llmagent.CompletionResponse{Err: err}
 			return
 		}
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(resp.Body)
-			out <- llmagent.CompletionResponse{Err: errors.New("HTTP " + http.StatusText(resp.StatusCode) + ": " + string(b))}
-			resp.Body.Close()
-			return
-		}
-		defer resp.Body.Close()
+		defer bodyRc.Close()
 		if !req.StreamValue() {
 			var r struct {
 				Text string `json:"text"`
 			}
-			b, _ := io.ReadAll(resp.Body)
+			b, _ := io.ReadAll(bodyRc)
 			if err := json.Unmarshal(b, &r); err != nil {
 				out <- llmagent.CompletionResponse{Err: err}
 			} else {
@@ -111,7 +102,7 @@ func (d *DeepSeekProvider) Complete(ctx context.Context, req llmagent.Completion
 			}
 			return
 		}
-		reader := bufio.NewReader(resp.Body)
+		reader := bufio.NewReader(bodyRc)
 		for {
 			chunk, err := reader.ReadBytes('\n')
 			if err != nil {

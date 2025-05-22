@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/llmagent"
+	"github.com/oarkflow/llmagent/sdk/sonnet"
 )
 
 type SonnetProvider struct {
@@ -73,35 +74,26 @@ func (s *SonnetProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 	out := make(chan llmagent.CompletionResponse)
 	go func() {
 		defer close(out)
-		body := map[string]any{
+		payload := map[string]any{
 			"model":       req.Model,
 			"prompt":      concatenateMessages(req.Messages),
 			"stream":      *req.Stream,
-			"maxWords":    req.MaxTokens, // using max_tokens from request
+			"maxWords":    req.MaxTokens,
 			"temperature": req.Temperature,
 			"top_p":       req.TopP,
 		}
-		data, _ := json.Marshal(body)
-		httpReq, _ := http.NewRequestWithContext(ctx, "POST", s.cfg.BaseURL+"/v1/generate", bytes.NewReader(data))
-		httpReq.Header.Set("Authorization", "Bearer "+s.apiKey)
-		httpReq.Header.Set("Content-Type", "application/json")
-		resp, err := s.httpClient.Do(httpReq)
+		client := sonnet.NewClient(s.apiKey, s.cfg.BaseURL, "/v1/generate", s.cfg.Timeout, s.cfg.DefaultModel, s.cfg.SupportedModels)
+		bodyRc, err := client.Generate(ctx, payload)
 		if err != nil {
 			out <- llmagent.CompletionResponse{Err: err}
 			return
 		}
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(resp.Body)
-			out <- llmagent.CompletionResponse{Err: errors.New("HTTP " + http.StatusText(resp.StatusCode) + ": " + string(b))}
-			resp.Body.Close()
-			return
-		}
-		defer resp.Body.Close()
+		defer bodyRc.Close()
 		if !req.StreamValue() {
 			var r struct {
 				Output string `json:"output"`
 			}
-			b, _ := io.ReadAll(resp.Body)
+			b, _ := io.ReadAll(bodyRc)
 			if err := json.Unmarshal(b, &r); err != nil {
 				out <- llmagent.CompletionResponse{Err: err}
 			} else {
@@ -109,7 +101,7 @@ func (s *SonnetProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			}
 			return
 		}
-		reader := bufio.NewReader(resp.Body)
+		reader := bufio.NewReader(bodyRc)
 		for {
 			part, err := reader.ReadBytes('\n')
 			if err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/llmagent"
+	"github.com/oarkflow/llmagent/sdk/openai"
 )
 
 type OpenAIProvider struct {
@@ -74,7 +75,7 @@ func (o *OpenAIProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 	out := make(chan llmagent.CompletionResponse)
 	go func() {
 		defer close(out)
-		body := map[string]any{
+		payload := map[string]any{
 			"model":       req.Model,
 			"messages":    req.Messages,
 			"stream":      *req.Stream,
@@ -82,34 +83,21 @@ func (o *OpenAIProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			"max_tokens":  req.MaxTokens,
 			"top_p":       req.TopP,
 		}
-		data, _ := json.Marshal(body)
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", o.cfg.BaseURL+"/v1/chat/completions", bytes.NewReader(data))
+		client := openai.NewClient(o.apiKey, o.cfg.BaseURL, "/v1/chat/completions", o.cfg.Timeout, o.cfg.DefaultModel, o.cfg.SupportedModels)
+		bodyRc, err := client.ChatCompletion(ctx, payload)
 		if err != nil {
 			out <- llmagent.CompletionResponse{Err: err}
 			return
 		}
-		httpReq.Header.Set("Authorization", "Bearer "+o.apiKey)
-		httpReq.Header.Set("Content-Type", "application/json")
-		resp, err := o.httpClient.Do(httpReq)
-		if err != nil {
-			out <- llmagent.CompletionResponse{Err: err}
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(resp.Body)
-			out <- llmagent.CompletionResponse{Err: errors.New("HTTP " + http.StatusText(resp.StatusCode) + ": " + string(b))}
-			resp.Body.Close()
-			return
-		}
-		defer resp.Body.Close()
+		defer bodyRc.Close()
 		if !req.StreamValue() {
 			var res struct {
 				Choices []struct {
 					Message llmagent.Message `json:"message"`
 				} `json:"choices"`
 			}
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			if err := json.Unmarshal(bodyBytes, &res); err != nil {
+			b, _ := io.ReadAll(bodyRc)
+			if err := json.Unmarshal(b, &res); err != nil {
 				out <- llmagent.CompletionResponse{Err: err}
 				return
 			}
@@ -118,7 +106,7 @@ func (o *OpenAIProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			}
 			return
 		}
-		reader := bufio.NewReader(resp.Body)
+		reader := bufio.NewReader(bodyRc)
 		for {
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
