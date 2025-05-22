@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -76,6 +77,9 @@ type Vault struct {
 	normalAttempts int       // count for normal master key failures
 	bannedUntil    time.Time // ban period end time
 	lockedForever  bool      // permanent lock flag
+	// New fields for reset password feature:
+	EnableReset bool
+	ResetCode   string
 }
 
 func New() *Vault {
@@ -140,16 +144,50 @@ func (v *Vault) resetMasterKey() error {
 	return fmt.Errorf("failed to reset MasterKey: vault banned until %v", v.bannedUntil)
 }
 
+func promptForNewMasterKey() error {
+	// helper to prompt and initialize new MasterKey
+	for {
+		fmt.Print("Enter new MasterKey: ")
+		new1, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return err
+		}
+		fmt.Print("Confirm new MasterKey: ")
+		new2, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return err
+		}
+		if string(new1) != string(new2) {
+			fmt.Println("MasterKeys do not match. Try again.")
+			continue
+		}
+		// update cipher and save vault
+		// note: v should be accessible; caller must call v.initCipher(new1) and v.save()
+		// This helper is to be used inside promptMaster.
+		return nil
+	}
+}
+
 func (v *Vault) promptMaster() error {
 	// If already authenticated recently, skip
 	if time.Since(v.authedAt) < authCacheDuration && v.cipherGCM != nil {
 		return nil
 	}
-	// Check if vault is permanently locked
+	// Instead of immediately returning errors for ban or lock,
+	// if reset is enabled force a reset.
+	if v.EnableReset && ((!v.bannedUntil.IsZero() && time.Now().Before(v.bannedUntil)) || v.lockedForever) {
+		if err := v.forceReset(); err != nil {
+			return err
+		}
+		v.authedAt = time.Now()
+		return nil
+	}
+	// For vaults without reset enabled, then enforce ban/lock restrictions.
 	if v.lockedForever {
 		return fmt.Errorf("vault locked permanently")
 	}
-	// Check if vault is banned
 	if !v.bannedUntil.IsZero() && time.Now().Before(v.bannedUntil) {
 		return fmt.Errorf("vault banned until %v", v.bannedUntil)
 	}
@@ -174,6 +212,16 @@ func (v *Vault) promptMaster() error {
 				continue
 			}
 			v.initCipher(pw1)
+			// Prompt to enable reset password feature.
+			fmt.Print("Enable Reset Password? (y/N): ")
+			respReader := bufio.NewReader(os.Stdin)
+			resp, _ := respReader.ReadString('\n')
+			resp = strings.TrimSpace(strings.ToLower(resp))
+			if resp == "y" {
+				v.EnableReset = true
+			} else {
+				v.EnableReset = false
+			}
 			if err := v.save(); err != nil {
 				return err
 			}
@@ -181,26 +229,48 @@ func (v *Vault) promptMaster() error {
 			return nil
 		}
 	} else {
-		// Existing vault: let user choose reset procedure or normal entry.
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Print("Do you want to reset MasterKey? (y/N): ")
-		ans, _ := reader.ReadString('\n')
-		ans = strings.TrimSpace(strings.ToLower(ans))
-		if ans == "y" {
-			if err := v.resetMasterKey(); err != nil {
-				return err
-			}
-			// Reset successful; proceed.
-			v.authedAt = time.Now()
-			return nil
-		}
-		// Normal master key input loop.
+		// Existing vault: normal master key input loop.
 		for {
-			if v.lockedForever {
-				return fmt.Errorf("vault locked permanently")
-			}
-			if !v.bannedUntil.IsZero() && time.Now().Before(v.bannedUntil) {
-				return fmt.Errorf("vault banned until %v", v.bannedUntil)
+			// If a reset code is pending, prompt for it.
+			if v.EnableReset && v.ResetCode != "" {
+				fmt.Print("Enter reset code: ")
+				resetReader := bufio.NewReader(os.Stdin)
+				input, _ := resetReader.ReadString('\n')
+				input = strings.TrimSpace(input)
+				if input == v.ResetCode {
+					for {
+						fmt.Print("Enter new MasterKey: ")
+						new1, err := term.ReadPassword(int(os.Stdin.Fd()))
+						fmt.Println()
+						if err != nil {
+							return err
+						}
+						fmt.Print("Confirm new MasterKey: ")
+						new2, err := term.ReadPassword(int(os.Stdin.Fd()))
+						fmt.Println()
+						if err != nil {
+							return err
+						}
+						if string(new1) != string(new2) {
+							fmt.Println("MasterKeys do not match. Try again.")
+							continue
+						}
+						v.initCipher(new1)
+						v.normalAttempts = 0
+						v.bannedUntil = time.Time{}
+						v.lockedForever = false
+						v.ResetCode = ""
+						if err := v.save(); err != nil {
+							return err
+						}
+						fmt.Println("MasterKey has been reset successfully.")
+						v.authedAt = time.Now()
+						return nil
+					}
+				} else {
+					fmt.Println("Incorrect reset code.")
+					continue
+				}
 			}
 			fmt.Print("Enter MasterKey: ")
 			pw, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -210,23 +280,86 @@ func (v *Vault) promptMaster() error {
 			}
 			v.initCipher(pw)
 			if err := v.load(); err != nil {
+				if strings.Contains(err.Error(), "vault banned until") {
+					return err
+				}
 				fmt.Println("Incorrect MasterKey.")
 				v.normalAttempts++
 				if v.normalAttempts >= 3 {
-					// If already banned, lock permanently.
-					if !v.bannedUntil.IsZero() && time.Now().After(v.bannedUntil) {
-						v.lockedForever = true
-						return fmt.Errorf("vault locked permanently due to repeated failures")
+					if v.EnableReset {
+						if v.ResetCode == "" {
+							var num int64
+							binary.Read(rand.Reader, binary.BigEndian, &num)
+							v.ResetCode = fmt.Sprintf("%06d", num%1000000)
+							sendResetEmail(v.ResetCode)
+							fmt.Println("Too many attempts. Reset code has been sent to your email.")
+						}
+						continue // will then prompt for reset code
+					} else {
+						v.bannedUntil = time.Now().Add(10 * time.Minute)
+						fmt.Printf("Too many attempts. Vault is banned until %v.\n", v.bannedUntil.Format(time.DateTime))
+						v.save()
+						return fmt.Errorf("failed to authenticate")
 					}
-					// Otherwise, enforce a ban.
-					v.bannedUntil = time.Now().Add(10 * time.Minute)
-					fmt.Printf("Too many attempts. Vault is banned until %v.\n", v.bannedUntil)
 				}
 				continue
 			}
 			v.authedAt = time.Now()
-			// Reset normal attempt counter after a success.
 			v.normalAttempts = 0
+			return nil
+		}
+	}
+}
+
+// Add a new helper function for forced reset when vault is banned/locked.
+func (v *Vault) forceReset() error {
+	// If no reset code exists, generate one and send email.
+	if v.ResetCode == "" {
+		var num int64
+		binary.Read(rand.Reader, binary.BigEndian, &num)
+		v.ResetCode = fmt.Sprintf("%06d", num%1000000)
+		sendResetEmail(v.ResetCode)
+		fmt.Println("Vault is banned/locked. Reset code has been sent to your email.")
+	}
+	// Loop until correct reset code is entered and new MasterKey set.
+	for {
+		fmt.Print("Enter reset code: ")
+		resetReader := bufio.NewReader(os.Stdin)
+		input, _ := resetReader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input != v.ResetCode {
+			fmt.Println("Incorrect reset code.")
+			continue
+		}
+		// Reset code is correct; prompt for new MasterKey.
+		for {
+			fmt.Print("Enter new MasterKey: ")
+			new1, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if err != nil {
+				return err
+			}
+			fmt.Print("Confirm new MasterKey: ")
+			new2, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if err != nil {
+				return err
+			}
+			if string(new1) != string(new2) {
+				fmt.Println("MasterKeys do not match. Try again.")
+				continue
+			}
+			v.initCipher(new1)
+			// Reset all failure counters and clear ResetCode.
+			v.resetAttempts = 0
+			v.normalAttempts = 0
+			v.bannedUntil = time.Time{}
+			v.lockedForever = false
+			v.ResetCode = ""
+			if err := v.save(); err != nil {
+				return err
+			}
+			fmt.Println("MasterKey has been reset successfully.")
 			return nil
 		}
 	}
@@ -265,11 +398,53 @@ func (v *Vault) load() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(plain, &v.data)
+	// Define a structure that matches the saved format.
+	var persist struct {
+		Data           map[string]string `json:"data"`
+		ResetAttempts  int               `json:"resetAttempts"`
+		NormalAttempts int               `json:"normalAttempts"`
+		BannedUntil    time.Time         `json:"bannedUntil"`
+		LockedForever  bool              `json:"lockedForever"`
+		EnableReset    bool              `json:"enableReset"`
+		ResetCode      string            `json:"resetCode"`
+	}
+	if err := json.Unmarshal(plain, &persist); err != nil {
+		return err
+	}
+	// Assign loaded values back to the vault.
+	v.data = persist.Data
+	v.resetAttempts = persist.ResetAttempts
+	v.normalAttempts = persist.NormalAttempts
+	v.bannedUntil = persist.BannedUntil
+	v.lockedForever = persist.LockedForever
+	v.EnableReset = persist.EnableReset
+	v.ResetCode = persist.ResetCode
+	if !v.bannedUntil.IsZero() && time.Now().Before(v.bannedUntil) {
+		return fmt.Errorf("vault banned until %v", v.bannedUntil.Format(time.DateTime))
+	}
+	return nil
 }
 
 func (v *Vault) save() error {
-	plain, err := json.Marshal(v.data)
+	// Create a struct that includes both secret data and config flags.
+	persist := struct {
+		Data           map[string]string `json:"data"`
+		ResetAttempts  int               `json:"resetAttempts"`
+		NormalAttempts int               `json:"normalAttempts"`
+		BannedUntil    time.Time         `json:"bannedUntil"`
+		LockedForever  bool              `json:"lockedForever"`
+		EnableReset    bool              `json:"enableReset"`
+		ResetCode      string            `json:"resetCode"`
+	}{
+		Data:           v.data,
+		ResetAttempts:  v.resetAttempts,
+		NormalAttempts: v.normalAttempts,
+		BannedUntil:    v.bannedUntil,
+		LockedForever:  v.lockedForever,
+		EnableReset:    v.EnableReset,
+		ResetCode:      v.ResetCode,
+	}
+	plain, err := json.Marshal(persist)
 	if err != nil {
 		return err
 	}
@@ -328,7 +503,11 @@ func (v *Vault) Copy(key string) error {
 // Execute starts CLI and HTTP server
 func Execute() {
 	vault := New()
-	_ = vault.promptMaster()
+	err := vault.promptMaster()
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 	go startHTTP(vault)
 	cliLoop(vault)
 }
