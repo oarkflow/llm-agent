@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -18,7 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	
+
 	"golang.org/x/crypto/ssh/terminal"
 )
 
@@ -71,8 +70,7 @@ func NewVault() *Vault {
 
 // promptMaster ensures master key is set/loaded and cached
 func (v *Vault) promptMaster() error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+	// Removed internal lock; caller must hold lock.
 	// If already authenticated recently, skip
 	if time.Since(v.authedAt) < authCacheDuration && v.cipherGCM != nil {
 		return nil
@@ -80,22 +78,23 @@ func (v *Vault) promptMaster() error {
 	// Check if vault file exists
 	_, err := os.Stat(FilePath())
 	if os.IsNotExist(err) {
-		// First-time setup: set new master key
+		// New vault setup: prompt for new MasterKey with clear message
 		for {
-			fmt.Print("Set a new master key: ")
+			fmt.Println("Vault database not found. Setting up a new vault. Please set a new MasterKey.")
+			fmt.Print("Enter new MasterKey: ")
 			pw1, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Println()
 			if err != nil {
 				return err
 			}
-			fmt.Print("Confirm master key: ")
+			fmt.Print("Confirm new MasterKey: ")
 			pw2, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Println()
 			if err != nil {
 				return err
 			}
-			if !errors.Is(nil, nil) && string(pw1) != string(pw2) {
-				fmt.Println("Keys do not match. Try again.")
+			if string(pw1) != string(pw2) {
+				fmt.Println("MasterKeys do not match. Try again.")
 				continue
 			}
 			key := deriveKey(pw1)
@@ -118,10 +117,9 @@ func (v *Vault) promptMaster() error {
 			return nil
 		}
 	} else if err != nil {
-		// unexpected stat error
 		return err
 	}
-	// Existing vault: prompt for master key
+	// Existing vault: prompt for password to enter
 	fmt.Print("Enter master key: ")
 	pw, err := terminal.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -137,7 +135,6 @@ func (v *Vault) promptMaster() error {
 	if err != nil {
 		return err
 	}
-	// attempt load
 	v.masterKey = key
 	v.cipherGCM = gcm
 	v.nonceSize = gcm.NonceSize()
@@ -195,6 +192,8 @@ func (v *Vault) save() error {
 
 // Set adds or updates a secret
 func (v *Vault) Set(key, value string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if err := v.promptMaster(); err != nil {
 		return err
 	}
@@ -204,6 +203,8 @@ func (v *Vault) Set(key, value string) error {
 
 // Get retrieves a secret
 func (v *Vault) Get(key string) (string, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if err := v.promptMaster(); err != nil {
 		return "", err
 	}
@@ -216,6 +217,8 @@ func (v *Vault) Get(key string) (string, error) {
 
 // Delete removes a secret
 func (v *Vault) Delete(key string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if err := v.promptMaster(); err != nil {
 		return err
 	}
@@ -225,6 +228,13 @@ func (v *Vault) Delete(key string) error {
 
 func Execute() {
 	vault := NewVault()
+	// pre-authenticate vault in a locked region
+	vault.mu.Lock()
+	err := vault.promptMaster()
+	vault.mu.Unlock()
+	if err != nil {
+		log.Fatal("Authentication failed:", err)
+	}
 	// Start REST API in background
 	go func() {
 		http.HandleFunc("/vault/", func(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +267,7 @@ func Execute() {
 		log.Println("REST API running on :8080")
 		log.Fatal(http.ListenAndServe(":8080", nil))
 	}()
-	
+
 	// CLI loop
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
