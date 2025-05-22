@@ -616,6 +616,41 @@ func (v *Vault) Copy(key string) error {
 	return clipboard.WriteAll(val)
 }
 
+// Add functions to set secrets to OS environment variables
+
+func (v *Vault) Env(key string) error {
+	// Retrieve secret using existing Get method.
+	secret, err := v.Get(key)
+	if err != nil {
+		return err
+	}
+	return os.Setenv(key, secret)
+}
+
+func (v *Vault) EnrichEnv() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for k, val := range v.data {
+		var s string
+		switch tv := val.(type) {
+		case string:
+			s = tv
+		case map[string]interface{}:
+			js, err := json.Marshal(tv)
+			if err != nil {
+				continue
+			}
+			s = string(js)
+		default:
+			s = fmt.Sprintf("%v", tv)
+		}
+		if err := os.Setenv(k, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Execute starts CLI and HTTP server
 func Execute() {
 	vault := New()
@@ -674,8 +709,16 @@ func cliLoop(vault *Vault) {
 				return
 			}
 			parts := strings.Fields(line)
+			// If "list" command, no key required.
+			if len(parts) > 0 && strings.ToLower(parts[0]) == "list" {
+				keys := vault.List()
+				for _, k := range keys {
+					fmt.Println(k)
+				}
+				continue
+			}
 			if len(parts) < 2 {
-				fmt.Println("usage: set|get|delete|copy key [value]")
+				fmt.Println("usage: set|get|delete|copy|env|enrich|list key [value]")
 				continue
 			}
 			op, key := strings.ToLower(parts[0]), parts[1]
@@ -704,6 +747,20 @@ func cliLoop(vault *Vault) {
 				} else {
 					fmt.Println("secret copied to clipboard")
 				}
+			case "env":
+				// New command to set a secret as an OS environment variable.
+				if err := vault.Env(key); err != nil {
+					fmt.Println("error:", err)
+				} else {
+					fmt.Println("Environment variable set:", key)
+				}
+			case "enrich":
+				// New command to set all vault secrets as OS environment variables.
+				if err := vault.EnrichEnv(); err != nil {
+					fmt.Println("error:", err)
+				} else {
+					fmt.Println("Vault secrets enriched into environment variables.")
+				}
 			case "exit":
 				_ = vault.save()
 				return
@@ -716,4 +773,15 @@ func cliLoop(vault *Vault) {
 			return
 		}
 	}
+}
+
+// Add a new function to list vault keys.
+func (v *Vault) List() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	keys := make([]string, 0, len(v.data))
+	for k := range v.data {
+		keys = append(keys, k)
+	}
+	return keys
 }
