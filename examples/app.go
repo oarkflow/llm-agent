@@ -7,12 +7,11 @@ import (
 )
 
 func main() {
-	store := vault.NewVault()
-	openAIKey, err := store.Get("OPENAI_KEY")
+	openAIKey, err := vault.Get("OPENAI_KEY")
 	if err != nil {
 		panic(err)
 	}
-	deepSeekKey, err := store.Get("DEEPSEEK_KEY")
+	deepSeekKey, err := vault.Get("DEEPSEEK_KEY")
 	if err != nil {
 		panic(err)
 	}

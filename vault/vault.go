@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -18,13 +17,18 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
+
+	"github.com/oarkflow/llmagent/clipboard"
 )
 
-var vaultDir = "./.vault"
+var (
+	vaultDir     = "./.vault"
+	defaultVault *Vault
+)
 
 const (
-	storageFile       = "vault.db"
+	storageFile       = "store.vlt"
 	authCacheDuration = time.Minute
 )
 
@@ -32,6 +36,14 @@ func init() {
 	if err := initStorage(); err != nil {
 		log.Fatal(err)
 	}
+	defaultVault = New()
+}
+
+func Get(key string) (string, error) {
+	if defaultVault == nil {
+		return "", fmt.Errorf("vault not initialized")
+	}
+	return defaultVault.Get(key)
 }
 
 func FilePath() string {
@@ -47,13 +59,12 @@ func initStorage() error {
 	if _, err := os.Stat(vaultDir); os.IsNotExist(err) {
 		err = os.MkdirAll(vaultDir, 0700)
 		if err != nil {
-			return fmt.Errorf("Error creating .vault directory:", err)
+			return fmt.Errorf("Error creating .vault directory: %v", err)
 		}
 	}
 	return nil
 }
 
-// Vault holds encrypted secrets on disk
 type Vault struct {
 	data      map[string]string
 	masterKey []byte
@@ -63,32 +74,26 @@ type Vault struct {
 	nonceSize int
 }
 
-// NewVault initializes an empty Vault instance
-func NewVault() *Vault {
+func New() *Vault {
 	return &Vault{data: make(map[string]string)}
 }
 
-// promptMaster ensures master key is set/loaded and cached
 func (v *Vault) promptMaster() error {
-	// Removed internal lock; caller must hold lock.
-	// If already authenticated recently, skip
 	if time.Since(v.authedAt) < authCacheDuration && v.cipherGCM != nil {
 		return nil
 	}
-	// Check if vault file exists
-	_, err := os.Stat(FilePath())
-	if os.IsNotExist(err) {
-		// New vault setup: prompt for new MasterKey with clear message
+	if _, err := os.Stat(FilePath()); os.IsNotExist(err) {
+		// First-time setup: create new master key
 		for {
-			fmt.Println("Vault database not found. Setting up a new vault. Please set a new MasterKey.")
+			fmt.Println("Vault database not found. Setting up a new vault.")
 			fmt.Print("Enter new MasterKey: ")
-			pw1, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+			pw1, err := term.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Println()
 			if err != nil {
 				return err
 			}
 			fmt.Print("Confirm new MasterKey: ")
-			pw2, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+			pw2, err := term.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Println()
 			if err != nil {
 				return err
@@ -97,56 +102,43 @@ func (v *Vault) promptMaster() error {
 				fmt.Println("MasterKeys do not match. Try again.")
 				continue
 			}
-			key := deriveKey(pw1)
-			block, err := aes.NewCipher(key)
-			if err != nil {
-				return err
-			}
-			gcm, err := cipher.NewGCM(block)
-			if err != nil {
-				return err
-			}
-			v.masterKey = key
-			v.cipherGCM = gcm
-			v.nonceSize = gcm.NonceSize()
-			// save empty vault
+			v.initCipher(pw1)
 			if err := v.save(); err != nil {
 				return err
 			}
 			v.authedAt = time.Now()
 			return nil
 		}
-	} else if err != nil {
-		return err
+	} else {
+		// Existing vault: prompt for master key
+		for {
+			fmt.Print("Enter MasterKey: ")
+			pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if err != nil {
+				return err
+			}
+			v.initCipher(pw)
+			if err := v.load(); err != nil {
+				fmt.Println("Incorrect MasterKey. Try again.")
+				continue
+			}
+			v.authedAt = time.Now()
+			break
+		}
 	}
-	// Existing vault: prompt for password to enter
-	fmt.Print("Enter master key: ")
-	pw, err := terminal.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	if err != nil {
-		return err
-	}
-	key := deriveKey(pw)
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return err
-	}
-	v.masterKey = key
-	v.cipherGCM = gcm
-	v.nonceSize = gcm.NonceSize()
-	if err := v.load(); err != nil {
-		v.cipherGCM = nil // reset
-		return fmt.Errorf("failed to decrypt vault: %w", err)
-	}
-	v.authedAt = time.Now()
 	return nil
 }
 
-// deriveKey pads/truncates password to 32 bytes
+func (v *Vault) initCipher(pw []byte) {
+	key := deriveKey(pw)
+	block, _ := aes.NewCipher(key)
+	gcm, _ := cipher.NewGCM(block)
+	v.masterKey = key
+	v.cipherGCM = gcm
+	v.nonceSize = gcm.NonceSize()
+}
+
 func deriveKey(pw []byte) []byte {
 	key := make([]byte, 32)
 	n := copy(key, pw)
@@ -156,7 +148,6 @@ func deriveKey(pw []byte) []byte {
 	return key
 }
 
-// load decrypts and loads vault data
 func (v *Vault) load() error {
 	enc, err := os.ReadFile(FilePath())
 	if err != nil {
@@ -175,22 +166,19 @@ func (v *Vault) load() error {
 	return json.Unmarshal(plain, &v.data)
 }
 
-// save encrypts and persists vault data
 func (v *Vault) save() error {
 	plain, err := json.Marshal(v.data)
 	if err != nil {
 		return err
 	}
 	nonce := make([]byte, v.nonceSize)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return err
-	}
+	_, _ = io.ReadFull(rand.Reader, nonce)
 	ciphertext := v.cipherGCM.Seal(nonce, nonce, plain, nil)
 	enc := base64.StdEncoding.EncodeToString(ciphertext)
 	return os.WriteFile(FilePath(), []byte(enc), 0600)
 }
 
-// Set adds or updates a secret
+// Set stores or updates a secret
 func (v *Vault) Set(key, value string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -226,49 +214,49 @@ func (v *Vault) Delete(key string) error {
 	return v.save()
 }
 
-func Execute() {
-	vault := NewVault()
-	// pre-authenticate vault in a locked region
-	vault.mu.Lock()
-	err := vault.promptMaster()
-	vault.mu.Unlock()
+// Copy retrieves a secret and copies it to clipboard
+func (v *Vault) Copy(key string) error {
+	val, err := v.Get(key)
 	if err != nil {
-		log.Fatal("Authentication failed:", err)
+		return err
 	}
-	// Start REST API in background
-	go func() {
-		http.HandleFunc("/vault/", func(w http.ResponseWriter, r *http.Request) {
-			key := strings.TrimPrefix(r.URL.Path, "/vault/")
-			switch r.Method {
-			case http.MethodGet:
-				val, err := vault.Get(key)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusNotFound)
-					return
-				}
-				fmt.Fprintln(w, val)
-			case http.MethodPost, http.MethodPut:
-				body, _ := ioutil.ReadAll(r.Body)
-				if err := vault.Set(key, string(body)); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			case http.MethodDelete:
-				if err := vault.Delete(key); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			}
-		})
-		log.Println("REST API running on :8080")
-		log.Fatal(http.ListenAndServe(":8080", nil))
-	}()
+	return clipboard.WriteAll(val)
+}
 
-	// CLI loop
+// Execute starts CLI and HTTP server
+func Execute() {
+	vault := New()
+	_ = vault.promptMaster()
+	go startHTTP(vault)
+	cliLoop(vault)
+}
+
+func startHTTP(vault *Vault) {
+	http.HandleFunc("/vault/", func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.URL.Path, "/vault/")
+		switch r.Method {
+		case http.MethodGet:
+			val, err := vault.Get(key)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			fmt.Fprintln(w, val)
+		case http.MethodPost, http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			_ = vault.Set(key, string(body))
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodDelete:
+			_ = vault.Delete(key)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func cliLoop(vault *Vault) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("vault> ")
@@ -277,14 +265,14 @@ func Execute() {
 		}
 		parts := strings.Fields(scanner.Text())
 		if len(parts) < 2 {
-			fmt.Println("usage: set|get|delete key [value]")
+			fmt.Println("usage: set|get|delete|copy key [value]")
 			continue
 		}
 		op, key := strings.ToLower(parts[0]), parts[1]
 		switch op {
 		case "set", "update":
 			fmt.Print("Enter secret: ")
-			pw, _ := terminal.ReadPassword(int(os.Stdin.Fd()))
+			pw, _ := term.ReadPassword(int(os.Stdin.Fd()))
 			fmt.Println()
 			if err := vault.Set(key, string(pw)); err != nil {
 				fmt.Println("error:", err)
@@ -299,6 +287,12 @@ func Execute() {
 		case "delete":
 			if err := vault.Delete(key); err != nil {
 				fmt.Println("error:", err)
+			}
+		case "copy":
+			if err := vault.Copy(key); err != nil {
+				fmt.Println("error:", err)
+			} else {
+				fmt.Println("secret copied to clipboard")
 			}
 		case "exit":
 			return
