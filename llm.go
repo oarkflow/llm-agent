@@ -11,11 +11,12 @@ import (
 type ProviderConfig struct {
 	BaseURL            string
 	Timeout            time.Duration
-	DefaultModel       string  // default model if request.Model is empty
-	DefaultStream      *bool   // default stream value if request.Stream is nil
-	DefaultTemperature float64 // default temperature (e.g. 0.7)
-	DefaultMaxTokens   int     // default max tokens (e.g. 100)
-	DefaultTopP        float64 // default top_p (e.g. 1.0)
+	DefaultModel       string   // default model if request.Model is empty
+	DefaultStream      *bool    // default stream value if request.Stream is nil
+	DefaultTemperature float64  // default temperature (e.g. 0.7)
+	DefaultMaxTokens   int      // default max tokens (e.g. 100)
+	DefaultTopP        float64  // default top_p (e.g. 1.0)
+	SupportedModels    []string // list of supported models
 }
 
 type Option func(*ProviderConfig)
@@ -98,6 +99,7 @@ type CompletionResponse struct {
 type Provider interface {
 	Name() string
 	Complete(ctx context.Context, req CompletionRequest) (<-chan CompletionResponse, error)
+	GetConfig() *ProviderConfig
 }
 
 // Agent holds user-registered providers and system default providers.
@@ -147,6 +149,15 @@ func (a *Agent) Complete(ctx context.Context, providerName string, req Completio
 	if p, ok = a.userProviders[name]; !ok {
 		if p, ok = a.systemProviders[name]; !ok {
 			return nil, fmt.Errorf("provider %q not registered", name)
+		}
+	}
+	cfg := p.GetConfig()
+	if cfg.DefaultModel == "" && req.Model == "" {
+		return nil, errors.New("no model specified")
+	}
+	if cfg.DefaultMaxTokens == 0 {
+		if req.MaxTokens == 0 {
+			req.MaxTokens = 200
 		}
 	}
 	return p.Complete(ctx, req)

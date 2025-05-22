@@ -23,12 +23,17 @@ type DeepSeekProvider struct {
 func NewDeepSeek(apiKey string, opts ...llmagent.Option) *DeepSeekProvider {
 	p := &DeepSeekProvider{apiKey: apiKey}
 	cfg := &llmagent.ProviderConfig{
-		BaseURL: "https://api.deepseek.ai",
+		BaseURL: "https://api.deepseek.com",
 		Timeout: 30 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	// Set supported models and default model if empty.
+	if cfg.DefaultModel == "" {
+		cfg.DefaultModel = "deepseek-chat"
+	}
+	cfg.SupportedModels = []string{"deepseek-chat", "deepseek-text"}
 	p.cfg = cfg
 	p.httpClient = &http.Client{Timeout: p.cfg.Timeout}
 	return p
@@ -38,7 +43,14 @@ func (d *DeepSeekProvider) Name() string {
 	return "deepseek"
 }
 
+func (c *DeepSeekProvider) GetConfig() *llmagent.ProviderConfig {
+	return c.cfg
+}
+
 func (d *DeepSeekProvider) Complete(ctx context.Context, req llmagent.CompletionRequest) (<-chan llmagent.CompletionResponse, error) {
+	if d.apiKey == "" {
+		return nil, errors.New("API key is required")
+	}
 	if req.Model == "" {
 		req.Model = d.cfg.DefaultModel
 	}
@@ -57,20 +69,23 @@ func (d *DeepSeekProvider) Complete(ctx context.Context, req llmagent.Completion
 	if req.TopP == 0 {
 		req.TopP = d.cfg.DefaultTopP
 	}
+	if req.TopP == 0 {
+		req.TopP = 1.0
+	}
 	out := make(chan llmagent.CompletionResponse)
 	go func() {
 		defer close(out)
 		body := map[string]any{
 			"model":       req.Model,
-			"prompts":     req.Messages,
+			"messages":    req.Messages,
 			"stream":      *req.Stream,
 			"temperature": req.Temperature,
 			"max_tokens":  req.MaxTokens,
 			"top_p":       req.TopP,
 		}
 		data, _ := json.Marshal(body)
-		httpReq, _ := http.NewRequestWithContext(ctx, "POST", d.cfg.BaseURL+"/api/v1/completions", bytes.NewReader(data))
-		httpReq.Header.Set("X-API-Key", d.apiKey)
+		httpReq, _ := http.NewRequestWithContext(ctx, "POST", d.cfg.BaseURL+"/chat/completions", bytes.NewReader(data))
+		httpReq.Header.Set("Authorization", "Bearer "+d.apiKey)
 		httpReq.Header.Set("Content-Type", "application/json")
 		resp, err := d.httpClient.Do(httpReq)
 		if err != nil {

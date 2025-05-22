@@ -29,6 +29,11 @@ func NewSonnet(apiKey string, opts ...llmagent.Option) *SonnetProvider {
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	// Set supported models and default model if empty.
+	if cfg.DefaultModel == "" {
+		cfg.DefaultModel = "sonnet-basic"
+	}
+	cfg.SupportedModels = []string{"sonnet-basic", "sonnet-pro"}
 	p.cfg = cfg
 	p.httpClient = &http.Client{Timeout: p.cfg.Timeout}
 	return p
@@ -38,7 +43,14 @@ func (s *SonnetProvider) Name() string {
 	return "sonnet"
 }
 
+func (c *SonnetProvider) GetConfig() *llmagent.ProviderConfig {
+	return c.cfg
+}
+
 func (s *SonnetProvider) Complete(ctx context.Context, req llmagent.CompletionRequest) (<-chan llmagent.CompletionResponse, error) {
+	if s.apiKey == "" {
+		return nil, errors.New("API key is required")
+	}
 	if req.Model == "" {
 		req.Model = s.cfg.DefaultModel
 	}

@@ -30,6 +30,11 @@ func NewOpenAI(apiKey string, opts ...llmagent.Option) *OpenAIProvider {
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	// Set supported models and default model if empty.
+	if cfg.DefaultModel == "" {
+		cfg.DefaultModel = "gpt-3.5-turbo"
+	}
+	cfg.SupportedModels = []string{"gpt-3.5-turbo", "gpt-4"}
 	p.cfg = cfg
 	p.httpClient = &http.Client{Timeout: p.cfg.Timeout}
 	return p
@@ -39,7 +44,14 @@ func (o *OpenAIProvider) Name() string {
 	return "openai"
 }
 
+func (c *OpenAIProvider) GetConfig() *llmagent.ProviderConfig {
+	return c.cfg
+}
+
 func (o *OpenAIProvider) Complete(ctx context.Context, req llmagent.CompletionRequest) (<-chan llmagent.CompletionResponse, error) {
+	if o.apiKey == "" {
+		return nil, errors.New("API key is required")
+	}
 	// Use defaults from config if not provided by request
 	if req.Model == "" {
 		req.Model = o.cfg.DefaultModel
