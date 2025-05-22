@@ -67,7 +67,7 @@ func initStorage() error {
 }
 
 type Vault struct {
-	data           map[string]string
+	data           map[string]interface{}
 	masterKey      []byte
 	authedAt       time.Time
 	mu             sync.Mutex
@@ -83,7 +83,7 @@ type Vault struct {
 }
 
 func New() *Vault {
-	return &Vault{data: make(map[string]string)}
+	return &Vault{data: make(map[string]interface{})}
 }
 
 // sendResetEmail simulates sending an email with the reset code
@@ -400,13 +400,13 @@ func (v *Vault) load() error {
 	}
 	// Define a structure that matches the saved format.
 	var persist struct {
-		Data           map[string]string `json:"data"`
-		ResetAttempts  int               `json:"resetAttempts"`
-		NormalAttempts int               `json:"normalAttempts"`
-		BannedUntil    time.Time         `json:"bannedUntil"`
-		LockedForever  bool              `json:"lockedForever"`
-		EnableReset    bool              `json:"enableReset"`
-		ResetCode      string            `json:"resetCode"`
+		Data           map[string]interface{} `json:"data"`
+		ResetAttempts  int                    `json:"resetAttempts"`
+		NormalAttempts int                    `json:"normalAttempts"`
+		BannedUntil    time.Time              `json:"bannedUntil"`
+		LockedForever  bool                   `json:"lockedForever"`
+		EnableReset    bool                   `json:"enableReset"`
+		ResetCode      string                 `json:"resetCode"`
 	}
 	if err := json.Unmarshal(plain, &persist); err != nil {
 		return err
@@ -428,13 +428,13 @@ func (v *Vault) load() error {
 func (v *Vault) save() error {
 	// Create a struct that includes both secret data and config flags.
 	persist := struct {
-		Data           map[string]string `json:"data"`
-		ResetAttempts  int               `json:"resetAttempts"`
-		NormalAttempts int               `json:"normalAttempts"`
-		BannedUntil    time.Time         `json:"bannedUntil"`
-		LockedForever  bool              `json:"lockedForever"`
-		EnableReset    bool              `json:"enableReset"`
-		ResetCode      string            `json:"resetCode"`
+		Data           map[string]interface{} `json:"data"`
+		ResetAttempts  int                    `json:"resetAttempts"`
+		NormalAttempts int                    `json:"normalAttempts"`
+		BannedUntil    time.Time              `json:"bannedUntil"`
+		LockedForever  bool                   `json:"lockedForever"`
+		EnableReset    bool                   `json:"enableReset"`
+		ResetCode      string                 `json:"resetCode"`
 	}{
 		Data:           v.data,
 		ResetAttempts:  v.resetAttempts,
@@ -462,7 +462,56 @@ func (v *Vault) Set(key, value string) error {
 	if err := v.promptMaster(); err != nil {
 		return err
 	}
-	v.data[key] = value
+	// Support dot-notation
+	if strings.Contains(key, ".") {
+		parts := strings.Split(key, ".")
+		base := parts[0]
+		subkeys := parts[1:]
+		var node map[string]interface{}
+		if existing, ok := v.data[base]; ok {
+			if m, ok := existing.(map[string]interface{}); ok {
+				node = m
+			} else {
+				node = make(map[string]interface{})
+			}
+		} else {
+			node = make(map[string]interface{})
+		}
+		current := node
+		for i, k := range subkeys {
+			if i == len(subkeys)-1 {
+				current[k] = value
+			} else {
+				if next, ok := current[k]; ok {
+					if m, ok := next.(map[string]interface{}); ok {
+						current = m
+					} else {
+						m := make(map[string]interface{})
+						current[k] = m
+						current = m
+					}
+				} else {
+					m := make(map[string]interface{})
+					current[k] = m
+					current = m
+				}
+			}
+		}
+		v.data[base] = node
+	} else {
+		trimmed := strings.TrimSpace(value)
+		// If value looks like JSON, try to decode it.
+		if strings.HasPrefix(trimmed, "{") {
+			var parsed map[string]interface{}
+			if err := json.Unmarshal([]byte(value), &parsed); err == nil {
+				v.data[key] = parsed
+			} else {
+				v.data[key] = value
+			}
+		} else {
+			v.data[key] = value
+		}
+	}
 	return v.save()
 }
 
@@ -473,11 +522,48 @@ func (v *Vault) Get(key string) (string, error) {
 	if err := v.promptMaster(); err != nil {
 		return "", err
 	}
-	val, ok := v.data[key]
-	if !ok {
-		return "", fmt.Errorf("key %s not found", key)
+	if strings.Contains(key, ".") {
+		parts := strings.Split(key, ".")
+		base := parts[0]
+		subkeys := parts[1:]
+		node, ok := v.data[base]
+		if !ok {
+			return "", fmt.Errorf("key %s not found", key)
+		}
+		var current interface{} = node
+		for _, k := range subkeys {
+			if m, ok := current.(map[string]interface{}); ok {
+				current, ok = m[k]
+				if !ok {
+					return "", fmt.Errorf("key %s not found", key)
+				}
+			} else {
+				return "", fmt.Errorf("key %s not found", key)
+			}
+		}
+		switch v := current.(type) {
+		case map[string]interface{}:
+			b, _ := json.MarshalIndent(v, "", "  ")
+			return string(b), nil
+		case string:
+			return v, nil
+		default:
+			return fmt.Sprintf("%v", current), nil
+		}
+	} else {
+		value, ok := v.data[key]
+		if !ok {
+			return "", fmt.Errorf("key %s not found", key)
+		}
+		if m, ok := value.(map[string]interface{}); ok {
+			b, _ := json.MarshalIndent(m, "", "  ")
+			return string(b), nil
+		}
+		if s, ok := value.(string); ok {
+			return s, nil
+		}
+		return fmt.Sprintf("%v", value), nil
 	}
-	return val, nil
 }
 
 // Delete removes a secret
@@ -487,7 +573,37 @@ func (v *Vault) Delete(key string) error {
 	if err := v.promptMaster(); err != nil {
 		return err
 	}
-	delete(v.data, key)
+	if strings.Contains(key, ".") {
+		parts := strings.Split(key, ".")
+		base := parts[0]
+		subkeys := parts[1:]
+		node, ok := v.data[base]
+		if !ok {
+			return fmt.Errorf("key %s not found", key)
+		}
+		current, ok := node.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("key %s not found", key)
+		}
+		for i, k := range subkeys {
+			if i == len(subkeys)-1 {
+				delete(current, k)
+			} else {
+				if next, ok := current[k].(map[string]interface{}); ok {
+					current = next
+				} else {
+					return fmt.Errorf("key %s not found", key)
+				}
+			}
+		}
+		if len(current) == 0 {
+			delete(v.data, base)
+		} else {
+			v.data[base] = current
+		}
+	} else {
+		delete(v.data, key)
+	}
 	return v.save()
 }
 
@@ -538,47 +654,66 @@ func startHTTP(vault *Vault) {
 }
 
 func cliLoop(vault *Vault) {
-	scanner := bufio.NewScanner(os.Stdin)
+	// Start a goroutine to read input lines
+	inputChan := make(chan string)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			inputChan <- scanner.Text()
+		}
+		close(inputChan)
+	}()
+	idleDuration := 5 * time.Minute
 	for {
 		fmt.Print("vault> ")
-		if !scanner.Scan() {
-			break
-		}
-		parts := strings.Fields(scanner.Text())
-		if len(parts) < 2 {
-			fmt.Println("usage: set|get|delete|copy key [value]")
-			continue
-		}
-		op, key := strings.ToLower(parts[0]), parts[1]
-		switch op {
-		case "set", "update":
-			fmt.Print("Enter secret: ")
-			pw, _ := term.ReadPassword(int(os.Stdin.Fd()))
-			fmt.Println()
-			if err := vault.Set(key, string(pw)); err != nil {
-				fmt.Println("error:", err)
+		select {
+		case line, ok := <-inputChan:
+			if !ok {
+				fmt.Println("Input closed. Exiting vault.")
+				_ = vault.save()
+				return
 			}
-		case "get":
-			val, err := vault.Get(key)
-			if err != nil {
-				fmt.Println("error:", err)
-			} else {
-				fmt.Println(val)
+			parts := strings.Fields(line)
+			if len(parts) < 2 {
+				fmt.Println("usage: set|get|delete|copy key [value]")
+				continue
 			}
-		case "delete":
-			if err := vault.Delete(key); err != nil {
-				fmt.Println("error:", err)
+			op, key := strings.ToLower(parts[0]), parts[1]
+			switch op {
+			case "set", "update":
+				fmt.Print("Enter secret: ")
+				pw, _ := term.ReadPassword(int(os.Stdin.Fd()))
+				fmt.Println()
+				if err := vault.Set(key, string(pw)); err != nil {
+					fmt.Println("error:", err)
+				}
+			case "get":
+				val, err := vault.Get(key)
+				if err != nil {
+					fmt.Println("error:", err)
+				} else {
+					fmt.Println(val)
+				}
+			case "delete":
+				if err := vault.Delete(key); err != nil {
+					fmt.Println("error:", err)
+				}
+			case "copy":
+				if err := vault.Copy(key); err != nil {
+					fmt.Println("error:", err)
+				} else {
+					fmt.Println("secret copied to clipboard")
+				}
+			case "exit":
+				_ = vault.save()
+				return
+			default:
+				fmt.Println("unknown command")
 			}
-		case "copy":
-			if err := vault.Copy(key); err != nil {
-				fmt.Println("error:", err)
-			} else {
-				fmt.Println("secret copied to clipboard")
-			}
-		case "exit":
+		case <-time.After(idleDuration):
+			fmt.Println("\nVault idle for 5 minutes. Closing vault gracefully.")
+			_ = vault.save()
 			return
-		default:
-			fmt.Println("unknown command")
 		}
 	}
 }
