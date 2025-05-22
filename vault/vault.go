@@ -14,17 +14,45 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
+	
 	"golang.org/x/crypto/ssh/terminal"
 )
+
+var vaultDir = "./.vault"
 
 const (
 	storageFile       = "vault.db"
 	authCacheDuration = time.Minute
 )
+
+func init() {
+	if err := initStorage(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func FilePath() string {
+	return filepath.Join(vaultDir, storageFile)
+}
+
+func initStorage() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("Error getting home directory: %v", err)
+	}
+	vaultDir = filepath.Join(homeDir, ".vault")
+	if _, err := os.Stat(vaultDir); os.IsNotExist(err) {
+		err = os.MkdirAll(vaultDir, 0700)
+		if err != nil {
+			return fmt.Errorf("Error creating .vault directory:", err)
+		}
+	}
+	return nil
+}
 
 // Vault holds encrypted secrets on disk
 type Vault struct {
@@ -50,7 +78,7 @@ func (v *Vault) promptMaster() error {
 		return nil
 	}
 	// Check if vault file exists
-	_, err := os.Stat(storageFile)
+	_, err := os.Stat(FilePath())
 	if os.IsNotExist(err) {
 		// First-time setup: set new master key
 		for {
@@ -133,7 +161,7 @@ func deriveKey(pw []byte) []byte {
 
 // load decrypts and loads vault data
 func (v *Vault) load() error {
-	enc, err := ioutil.ReadFile(storageFile)
+	enc, err := os.ReadFile(FilePath())
 	if err != nil {
 		return err
 	}
@@ -162,7 +190,7 @@ func (v *Vault) save() error {
 	}
 	ciphertext := v.cipherGCM.Seal(nonce, nonce, plain, nil)
 	enc := base64.StdEncoding.EncodeToString(ciphertext)
-	return ioutil.WriteFile(storageFile, []byte(enc), 0600)
+	return os.WriteFile(FilePath(), []byte(enc), 0600)
 }
 
 // Set adds or updates a secret
@@ -195,9 +223,8 @@ func (v *Vault) Delete(key string) error {
 	return v.save()
 }
 
-func main() {
+func Execute() {
 	vault := NewVault()
-
 	// Start REST API in background
 	go func() {
 		http.HandleFunc("/vault/", func(w http.ResponseWriter, r *http.Request) {
@@ -230,7 +257,7 @@ func main() {
 		log.Println("REST API running on :8080")
 		log.Fatal(http.ListenAndServe(":8080", nil))
 	}()
-
+	
 	// CLI loop
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
