@@ -82,6 +82,8 @@ func (d *DeepSeekProvider) Complete(ctx context.Context, req llmagent.Completion
 			"temperature": req.Temperature,
 			"max_tokens":  req.MaxTokens,
 			"top_p":       req.TopP,
+			// add stop if provided
+			"stop": req.Stop,
 		}
 		client := deepseek.NewClient(d.apiKey, d.cfg.BaseURL, "/chat/completions", d.cfg.Timeout, d.cfg.DefaultModel, d.cfg.SupportedModels)
 		bodyRc, err := client.ChatCompletion(ctx, payload)

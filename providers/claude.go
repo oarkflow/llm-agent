@@ -79,6 +79,8 @@ func (c *ClaudeProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			"temperature": req.Temperature,
 			"max_tokens":  req.MaxTokens,
 			"top_p":       req.TopP,
+			// add stop if provided
+			"stop": req.Stop,
 		}
 		client := claude.NewClient(c.apiKey, c.cfg.BaseURL, "/v1/complete", c.cfg.Timeout, c.cfg.DefaultModel, c.cfg.SupportedModels)
 		bodyRc, err := client.Complete(ctx, payload)

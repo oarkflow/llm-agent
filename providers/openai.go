@@ -82,6 +82,8 @@ func (o *OpenAIProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			"temperature": req.Temperature,
 			"max_tokens":  req.MaxTokens,
 			"top_p":       req.TopP,
+			// add stop if provided
+			"stop": req.Stop,
 		}
 		client := openai.NewClient(o.apiKey, o.cfg.BaseURL, "/v1/chat/completions", o.cfg.Timeout, o.cfg.DefaultModel, o.cfg.SupportedModels)
 		bodyRc, err := client.ChatCompletion(ctx, payload)

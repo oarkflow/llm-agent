@@ -10,7 +10,7 @@ import (
 	"github.com/oarkflow/llmagent/providers"
 )
 
-func mai1n() {
+func main() {
 	// 1. Build agent and register providers (user-specific):
 	agent := llmagent.NewAgent()
 	

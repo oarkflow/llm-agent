@@ -81,6 +81,9 @@ func (s *SonnetProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			"maxWords":    req.MaxTokens,
 			"temperature": req.Temperature,
 			"top_p":       req.TopP,
+			// add stop if provided
+			// (will be omitted from JSON if empty)
+			"stop": req.Stop,
 		}
 		client := sonnet.NewClient(s.apiKey, s.cfg.BaseURL, "/v1/generate", s.cfg.Timeout, s.cfg.DefaultModel, s.cfg.SupportedModels)
 		bodyRc, err := client.Generate(ctx, payload)
