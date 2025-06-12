@@ -2,7 +2,7 @@ module github.com/oarkflow/llmagent
 
 go 1.24.2
 
-require github.com/oarkflow/secretr v0.0.17
+require github.com/oarkflow/secretr v0.0.18
 
 require (
 	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358 // indirect

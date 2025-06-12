@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/oarkflow/llmagent"
@@ -126,16 +127,42 @@ func (c *ClaudeProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 			}
 			return
 		}
+		// Modified streaming event handling for Anthropic
+		var buffer string
 		reader := bufio.NewReader(bodyRc)
 		for {
-			line, err := reader.ReadBytes('\n')
+			line, err := reader.ReadString('\n')
 			if err != nil {
 				if err != io.EOF {
 					out <- llmagent.CompletionResponse{Err: err}
 				}
 				break
 			}
-			out <- llmagent.CompletionResponse{Content: string(line)}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			// Handle Server-Sent Events with "data:" prefix.
+			if strings.HasPrefix(line, "data: ") {
+				jsonPart := strings.TrimPrefix(line, "data: ")
+				var event map[string]any
+				if err := json.Unmarshal([]byte(jsonPart), &event); err != nil {
+					continue
+				}
+				evtType, _ := event["type"].(string)
+				switch evtType {
+				case "content_block_delta":
+					if delta, ok := event["delta"].(map[string]any); ok {
+						if text, ok := delta["text"].(string); ok {
+							buffer += text
+							out <- llmagent.CompletionResponse{Content: text}
+						}
+					}
+				case "message_stop":
+					// End of message.
+					break
+				}
+			}
 		}
 	}()
 	return out, nil

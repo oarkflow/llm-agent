@@ -268,8 +268,6 @@ func (a *Agent) Complete(ctx context.Context, providerName string, req Completio
 			a.cacheLock.RUnlock()
 		}
 	}
-
-	// ...existing provider selection and request defaults code...
 	name := providerName
 	if name == "" {
 		name = a.DefaultProvider
@@ -395,4 +393,40 @@ CACHE_STORE:
 	}
 
 	return respChan, nil
+}
+
+// CommonResponse defines a unified response structure for completions.
+type CommonResponse struct {
+	Content string
+	Err     error
+}
+
+// StreamCommonResponse wraps Agent.Complete to return a stream of CommonResponse.
+func (a *Agent) StreamCommonResponse(ctx context.Context, providerName string, req CompletionRequest) (<-chan CommonResponse, error) {
+	ch, err := a.Complete(ctx, providerName, req)
+	if err != nil {
+		return nil, err
+	}
+	commonCh := make(chan CommonResponse)
+	go func() {
+		defer close(commonCh)
+		for resp := range ch {
+			commonCh <- CommonResponse{Content: resp.Content, Err: resp.Err}
+		}
+	}()
+	return commonCh, nil
+}
+
+// CompleteCommonResponse wraps Agent.Complete for non-streaming responses,
+// reading the single completion and returning it as a CommonResponse.
+func (a *Agent) CompleteCommonResponse(ctx context.Context, providerName string, req CompletionRequest) (CommonResponse, error) {
+	ch, err := a.Complete(ctx, providerName, req)
+	if err != nil {
+		return CommonResponse{}, err
+	}
+	resp, ok := <-ch
+	if !ok {
+		return CommonResponse{}, errors.New("empty response")
+	}
+	return CommonResponse{Content: resp.Content, Err: resp.Err}, nil
 }
