@@ -90,8 +90,9 @@ func WithRetryCount(count int) Option {
 
 // Message represents a single turn in the conversation.
 type Message struct {
-	Role    string `json:"role"`    // "user" or "assistant"
-	Content string `json:"content"` //
+	Role    string `json:"role"`           // "user" or "assistant"
+	Content string `json:"content"`        // The message content
+	Name    string `json:"name,omitempty"` // Optional name field for Claude API
 }
 
 // CompletionRequest holds settings for a completion call.

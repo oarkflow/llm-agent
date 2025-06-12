@@ -4,47 +4,50 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
-	
+
 	"github.com/oarkflow/llmagent"
 	"github.com/oarkflow/llmagent/providers"
+	"github.com/oarkflow/secretr"
 )
 
 func main() {
+	os.Setenv("SECRETR_MASTERKEY", "admintest")
 	// 1. Build agent and register providers (user-specific):
 	agent := llmagent.NewAgent()
-	
+	deepseekApiKey, err := secretr.Get("DEEPSEEK_KEY")
+	if err != nil {
+		panic(err)
+	}
+
+	openAIKey, err := secretr.Get("OPENAI_KEY")
+	if err != nil {
+		panic(err)
+	}
 	// Construct providers with their options and register.
-	openaiProvider := providers.NewOpenAI("OPENAI_API_KEY",
+	openaiProvider := providers.NewOpenAI(openAIKey,
 		llmagent.WithTimeout(30*time.Second),
 		llmagent.WithBaseURL("https://api.openai.com"))
 	agent.RegisterProvidersFromUser(openaiProvider)
-	
-	deepseekProvider := providers.NewDeepSeek("DEEPSEEK_API_KEY",
+	deepseekProvider := providers.NewDeepSeek(deepseekApiKey,
 		llmagent.WithTimeout(30*time.Second),
-		llmagent.WithBaseURL("https://api.deepseek.ai"))
+		llmagent.WithBaseURL("https://api.deepseek.com"))
 	agent.RegisterProvidersFromUser(deepseekProvider)
-	
-	claudeProvider := providers.NewClaude("ANTHROPIC_API_KEY",
+
+	claudeProvider := providers.NewClaude("anthropicApiKey",
 		llmagent.WithTimeout(30*time.Second),
 		llmagent.WithBaseURL("https://api.anthropic.com"))
 	agent.RegisterProvidersFromUser(claudeProvider)
-	
-	sonnetProvider := providers.NewSonnet("COHERE_API_KEY",
-		llmagent.WithTimeout(30*time.Second),
-		llmagent.WithBaseURL("https://api.cohere.ai"))
-	agent.RegisterProvidersFromUser(sonnetProvider)
-	
 	// 2. Set default and issue a completion:
-	if err := agent.SetDefault("openai"); err != nil {
+	if err := agent.SetDefault("deepseek"); err != nil {
 		panic(err)
 	}
-	
+
 	ctx := context.Background()
 	streamReq := true
 	req := llmagent.CompletionRequest{
-		Model:  "gpt-4o-mini", // or other model names per provider
-		Stream: &streamReq,    // toggle streaming
+		Stream: &streamReq, // toggle streaming
 		Messages: []llmagent.Message{
 			{Role: "system", Content: "You are a helpful assistant."},
 			{Role: "user", Content: "What's the capital of France?"},
@@ -54,7 +57,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	
+
 	for resp := range stream {
 		if resp.Err != nil {
 			fmt.Printf("[Error] %v\n", resp.Err)

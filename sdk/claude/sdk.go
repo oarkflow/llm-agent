@@ -24,7 +24,7 @@ func NewClient(apiKey, baseURL, completionEndpoint string, timeout time.Duration
 	return &Client{
 		APIKey:             apiKey,
 		BaseURL:            baseURL,
-		CompletionEndpoint: completionEndpoint,
+		CompletionEndpoint: completionEndpoint, // Changed endpoint
 		Timeout:            timeout,
 		DefaultModel:       defaultModel,
 		SupportedModels:    supportedModels,
@@ -41,7 +41,8 @@ func (c *Client) Complete(ctx context.Context, payload map[string]any) (io.ReadC
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	req.Header.Set("x-api-key", c.APIKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {

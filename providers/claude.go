@@ -29,11 +29,10 @@ func NewClaude(apiKey string, opts ...llmagent.Option) *ClaudeProvider {
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	// Set supported models and default model if empty.
 	if cfg.DefaultModel == "" {
-		cfg.DefaultModel = "claude-v1"
+		cfg.DefaultModel = "claude-3-opus-20240229" // Updated default model
 	}
-	cfg.SupportedModels = []string{"claude-v1", "claude-instant-v1"}
+	cfg.SupportedModels = []string{"claude-3-opus-20240229", "claude-3-sonnet-20240229"} // Updated models
 	p.cfg = cfg
 	p.httpClient = &http.Client{Timeout: p.cfg.Timeout}
 	return p
@@ -74,30 +73,56 @@ func (c *ClaudeProvider) Complete(ctx context.Context, req llmagent.CompletionRe
 		defer close(out)
 		payload := map[string]any{
 			"model":       req.Model,
-			"messages":    req.Messages,
-			"stream":      *req.Stream,
-			"temperature": req.Temperature,
 			"max_tokens":  req.MaxTokens,
-			"top_p":       req.TopP,
-			// add stop if provided
-			"stop": req.Stop,
+			"temperature": req.Temperature,
+			"stream":      req.StreamValue(),
 		}
-		client := claude.NewClient(c.apiKey, c.cfg.BaseURL, "/v1/complete", c.cfg.Timeout, c.cfg.DefaultModel, c.cfg.SupportedModels)
+		var systemMsg string
+		var msgs []map[string]any
+		for _, msg := range req.Messages {
+			if msg.Role == "system" {
+				systemMsg = msg.Content
+			} else {
+				m := map[string]any{
+					"role":    msg.Role,
+					"content": msg.Content,
+				}
+				if msg.Name != "" {
+					m["name"] = msg.Name
+				}
+				msgs = append(msgs, m)
+			}
+		}
+		if systemMsg != "" {
+			payload["system"] = systemMsg
+		}
+		payload["messages"] = msgs
+		client := claude.NewClient(c.apiKey, c.cfg.BaseURL, "/v1/messages", c.cfg.Timeout, c.cfg.DefaultModel, c.cfg.SupportedModels)
 		bodyRc, err := client.Complete(ctx, payload)
 		if err != nil {
 			out <- llmagent.CompletionResponse{Err: err}
 			return
 		}
 		defer bodyRc.Close()
+
 		if !req.StreamValue() {
 			var r struct {
-				Completion string `json:"completion"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
 			}
 			b, _ := io.ReadAll(bodyRc)
 			if err := json.Unmarshal(b, &r); err != nil {
 				out <- llmagent.CompletionResponse{Err: err}
-			} else {
-				out <- llmagent.CompletionResponse{Content: r.Completion}
+			} else if len(r.Content) > 0 {
+				var text string
+				for _, content := range r.Content {
+					if content.Type == "text" {
+						text += content.Text
+					}
+				}
+				out <- llmagent.CompletionResponse{Content: text}
 			}
 			return
 		}
